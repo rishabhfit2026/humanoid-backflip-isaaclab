@@ -40,15 +40,33 @@ def get_base_metadata(
   for actuator in robot.spec.actuators:
     joint_name = actuator.target.split("/")[-1]
     joint_name_to_ctrl_id[joint_name] = actuator.id
+
   # Get actuator IDs in natural joint order (same order as robot.joint_names).
-  ctrl_ids_natural = [joint_name_to_ctrl_id[jname] for jname in robot.joint_names]
-  joint_stiffness = env.sim.mj_model.actuator_gainprm[ctrl_ids_natural, 0]
-  joint_damping = -env.sim.mj_model.actuator_biasprm[ctrl_ids_natural, 2]
+  # Some joints may not have direct actuators (e.g., tendon-controlled ankles),
+  # so we filter to only include joints with matching actuators.
+  joints_with_actuators = [
+    jname for jname in robot.joint_names if jname in joint_name_to_ctrl_id
+  ]
+  ctrl_ids_natural = [joint_name_to_ctrl_id[jname] for jname in joints_with_actuators]
+
+  # Get stiffness/damping only for joints with direct actuators.
+  joint_stiffness = (
+    env.sim.mj_model.actuator_gainprm[ctrl_ids_natural, 0].tolist()
+    if ctrl_ids_natural
+    else []
+  )
+  joint_damping = (
+    (-env.sim.mj_model.actuator_biasprm[ctrl_ids_natural, 2]).tolist()
+    if ctrl_ids_natural
+    else []
+  )
+
   return {
     "run_path": run_path,
     "joint_names": list(robot.joint_names),
-    "joint_stiffness": joint_stiffness.tolist(),
-    "joint_damping": joint_damping.tolist(),
+    "joints_with_actuators": joints_with_actuators,
+    "joint_stiffness": joint_stiffness,
+    "joint_damping": joint_damping,
     "default_joint_pos": robot.data.default_joint_pos[0].cpu().tolist(),
     "command_names": list(env.command_manager.active_terms),
     "observation_names": env.observation_manager.active_terms["policy"],
