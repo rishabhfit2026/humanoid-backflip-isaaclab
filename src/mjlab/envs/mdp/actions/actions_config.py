@@ -23,6 +23,17 @@ class JointPositionActionCfg(JointActionCfg):
   use_default_offset: bool = True
 
 
+@dataclass(kw_only=True)
+class JointVelocityActionCfg(JointActionCfg):
+  class_type: type[ActionTerm] = joint_actions.JointVelocityAction
+  use_default_offset: bool = True
+
+
+@dataclass(kw_only=True)
+class JointEffortActionCfg(JointActionCfg):
+  class_type: type[ActionTerm] = joint_actions.JointEffortAction
+
+
 #
 # Ankle AB (tendon) action mapping configuration
 #

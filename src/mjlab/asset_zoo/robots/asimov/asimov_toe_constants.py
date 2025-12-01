@@ -6,12 +6,9 @@ import mujoco
 
 from mjlab import MJLAB_SRC_PATH
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
-from mjlab.utils.actuator import (
-  ElectricActuator,
-  reflected_inertia_from_two_stage_planetary,
-)
+from mjlab.actuator import BuiltinPositionActuatorCfg, LearnedMlpActuatorCfg
 from mjlab.utils.os import update_assets
-from mjlab.utils.spec_config import ActuatorCfg, CollisionCfg
+from mjlab.utils.spec_config import CollisionCfg
 
 ##
 # MJCF and assets.
@@ -39,80 +36,27 @@ def get_spec() -> mujoco.MjSpec:
 # Actuator config.
 ##
 
-# Motor specs - Using same motors as Booster T1 / Unitree G1 legs
-# Based on 7520 series actuators used in leg joints
+# Reflected inertia values from ENCOS motor specs (stats.md)
+# J_reflected = J_rotor * gear_ratio^2
+# Units: kg·m²
+REFLECTED_INERTIA = {
+    "hip_pitch": 0.0652,  # EC-A6416-P2-25: 104.395 kg·mm² * 25^2
+    "hip_roll": 0.100,    # EC-A5013-H17-100: 10 kg·mm² * 100^2
+    "hip_yaw": 0.0343,    # EC-A3814-H14-107: 3 kg·mm² * 107^2
+    "knee": 0.0330,       # EC-A4315-P2-36: 25.5 kg·mm² * 36^2
+    "ankle": 0.0472,      # EC-A4310-P2-36: 18.2 kg·mm² * 36^2 * 2 (parallel linkage)
+}
 
-ROTOR_INERTIAS_7520_14 = (
-  0.489e-4,
-  0.098e-4,
-  0.533e-4,
-)
-GEARS_7520_14 = (
-  1,
-  4.5,
-  1 + (48 / 22),
-)
-ARMATURE_7520_14 = reflected_inertia_from_two_stage_planetary(
-  ROTOR_INERTIAS_7520_14, GEARS_7520_14
-)
-
-ROTOR_INERTIAS_7520_22 = (
-  0.489e-4,
-  0.109e-4,
-  0.738e-4,
-)
-GEARS_7520_22 = (
-  1,
-  4.5,
-  5,
-)
-ARMATURE_7520_22 = reflected_inertia_from_two_stage_planetary(
-  ROTOR_INERTIAS_7520_22, GEARS_7520_22
-)
-
-# Ankle actuators - using similar specs as 5020 actuators but doubled for parallel linkage
-ROTOR_INERTIAS_5020 = (
-  0.139e-4,
-  0.017e-4,
-  0.169e-4,
-)
-GEARS_5020 = (
-  1,
-  1 + (46 / 18),
-  1 + (56 / 16),
-)
-ARMATURE_5020 = reflected_inertia_from_two_stage_planetary(
-  ROTOR_INERTIAS_5020, GEARS_5020
-)
-
-ACTUATOR_7520_14 = ElectricActuator(
-  reflected_inertia=ARMATURE_7520_14,
-  velocity_limit=32.0,
-  effort_limit=88.0,
-)
-ACTUATOR_7520_22 = ElectricActuator(
-  reflected_inertia=ARMATURE_7520_22,
-  velocity_limit=20.0,
-  effort_limit=139.0,
-)
-ACTUATOR_5020 = ElectricActuator(
-  reflected_inertia=ARMATURE_5020,
-  velocity_limit=37.0,
-  effort_limit=25.0,
-)
-
-# Lower natural frequency for lighter robot (50% mass of T1)
-# This reduces stiffness and makes control smoother
-NATURAL_FREQ = 8 * 2.0 * 3.1415926535  # 8Hz (was 10Hz for G1)
-DAMPING_RATIO = 1.8  # Slightly lower for lighter robot
-
-STIFFNESS_7520_14 = ARMATURE_7520_14 * NATURAL_FREQ**2
-STIFFNESS_7520_22 = ARMATURE_7520_22 * NATURAL_FREQ**2
-STIFFNESS_5020 = ARMATURE_5020 * NATURAL_FREQ**2
-
-DAMPING_7520_14 = 2.0 * DAMPING_RATIO * ARMATURE_7520_14 * NATURAL_FREQ
-DAMPING_7520_22 = 2.0 * DAMPING_RATIO * ARMATURE_7520_22 * NATURAL_FREQ
-DAMPING_5020 = 2.0 * DAMPING_RATIO * ARMATURE_5020 * NATURAL_FREQ
+# Identified gains from CAN data (symmetric L/R, Kd capped at 5.0)
+# These are the actual gains measured from hardware system identification.
+IDENTIFIED_GAINS = {
+    "hip_pitch": {"kp": 22.5, "kd": 1.4},
+    "hip_roll": {"kp": 118.0, "kd": 5.0},
+    "hip_yaw": {"kp": 130.0, "kd": 5.0},
+    "knee": {"kp": 84.0, "kd": 4.2},
+    "ankle_pitch": {"kp": 14.0, "kd": 1.7},
+    "ankle_roll": {"kp": 17.0, "kd": 1.1},
+}
 
 # Asimov joint actuator configuration
 # Updated with torque limits from encos based on current limits:
@@ -120,48 +64,108 @@ DAMPING_5020 = 2.0 * DAMPING_RATIO * ARMATURE_5020 * NATURAL_FREQ
 # Order: hip_pitch, hip_roll, hip_yaw, knee, ankle_pitch, ankle_roll (per leg)
 
 # Hip pitch joints - 55 Nm
-ASIMOV_ACTUATOR_HIP_PITCH = ActuatorCfg(
+ASIMOV_ACTUATOR_HIP_PITCH = BuiltinPositionActuatorCfg(
   joint_names_expr=(".*_hip_pitch_joint",),
   effort_limit=55.0,
-  armature=ACTUATOR_7520_14.reflected_inertia,
-  stiffness=STIFFNESS_7520_14,
-  damping=DAMPING_7520_14,
+  armature=REFLECTED_INERTIA["hip_pitch"],
+  stiffness=IDENTIFIED_GAINS["hip_pitch"]["kp"],
+  damping=IDENTIFIED_GAINS["hip_pitch"]["kd"],
 )
 
 # Hip roll joints - 90 Nm
-ASIMOV_ACTUATOR_HIP_ROLL = ActuatorCfg(
+ASIMOV_ACTUATOR_HIP_ROLL = BuiltinPositionActuatorCfg(
   joint_names_expr=(".*_hip_roll_joint",),
   effort_limit=90.0,
-  armature=ACTUATOR_7520_22.reflected_inertia,
-  stiffness=STIFFNESS_7520_22,
-  damping=DAMPING_7520_22,
+  armature=REFLECTED_INERTIA["hip_roll"],
+  stiffness=IDENTIFIED_GAINS["hip_roll"]["kp"],
+  damping=IDENTIFIED_GAINS["hip_roll"]["kd"],
 )
 
 # Hip yaw joints - 60 Nm
-ASIMOV_ACTUATOR_HIP_YAW = ActuatorCfg(
+ASIMOV_ACTUATOR_HIP_YAW = BuiltinPositionActuatorCfg(
   joint_names_expr=(".*_hip_yaw_joint",),
   effort_limit=60.0,
-  armature=ACTUATOR_7520_14.reflected_inertia,
-  stiffness=STIFFNESS_7520_14,
-  damping=DAMPING_7520_14,
+  armature=REFLECTED_INERTIA["hip_yaw"],
+  stiffness=IDENTIFIED_GAINS["hip_yaw"]["kp"],
+  damping=IDENTIFIED_GAINS["hip_yaw"]["kd"],
 )
 
 # Knee joints - 50 Nm
-ASIMOV_ACTUATOR_KNEE = ActuatorCfg(
+ASIMOV_ACTUATOR_KNEE = BuiltinPositionActuatorCfg(
   joint_names_expr=(".*_knee_joint",),
   effort_limit=50.0,
-  armature=ACTUATOR_7520_22.reflected_inertia,
-  stiffness=STIFFNESS_7520_22,
-  damping=DAMPING_7520_22,
+  armature=REFLECTED_INERTIA["knee"],
+  stiffness=IDENTIFIED_GAINS["knee"]["kp"],
+  damping=IDENTIFIED_GAINS["knee"]["kd"],
+)
+
+# Ankle pitch joints - 72 Nm (36 Nm * 2 for parallel linkage)
+ASIMOV_ACTUATOR_ANKLE_PITCH = BuiltinPositionActuatorCfg(
+  joint_names_expr=(".*_ankle_pitch_joint",),
+  effort_limit=72.0,
+  armature=REFLECTED_INERTIA["ankle"],
+  stiffness=IDENTIFIED_GAINS["ankle_pitch"]["kp"],
+  damping=IDENTIFIED_GAINS["ankle_pitch"]["kd"],
+)
+
+# Ankle roll joints - 72 Nm (36 Nm * 2 for parallel linkage)
+ASIMOV_ACTUATOR_ANKLE_ROLL = BuiltinPositionActuatorCfg(
+  joint_names_expr=(".*_ankle_roll_joint",),
+  effort_limit=72.0,
+  armature=REFLECTED_INERTIA["ankle"],
+  stiffness=IDENTIFIED_GAINS["ankle_roll"]["kp"],
+  damping=IDENTIFIED_GAINS["ankle_roll"]["kd"],
 )
 
 # Toe joints - passive spring with low control authority
-ASIMOV_TOE_ACTUATOR = ActuatorCfg(
+ASIMOV_TOE_ACTUATOR = BuiltinPositionActuatorCfg(
   joint_names_expr=("left_toe_joint", "right_toe_joint"),
   effort_limit=5.0,  # From URDF
   armature=0.0001,  # Minimal inertia
   stiffness=50.0,   # From URDF spring_stiffness
   damping=0.8,      # From URDF damping
+)
+
+##
+# Learned actuator config.
+##
+
+# Path to trained actuator network (TorchScript model).
+# Train using: python scripts/train_asimov_actuator.py --csv data.csv --output <path>
+ASIMOV_LEARNED_ACTUATOR_PATH = (
+  MJLAB_SRC_PATH
+  / "asset_zoo"
+  / "robots"
+  / "asimov"
+  / "assets"
+  / "asimov_actuator.pt"
+)
+
+# Learned MLP actuator for hip, knee, and ankle joints (excluding toe).
+# Network architecture: MLP with 32 hidden units, 2 layers, softsign activation.
+# Input: [pos_error[t-2:t], vel[t-2:t]] where pos_error = target - current
+# This matches mjlab's LearnedMlpActuator convention.
+ASIMOV_LEARNED_ACTUATOR_CFG = LearnedMlpActuatorCfg(
+  joint_names_expr=(
+    ".*_hip_pitch_joint",
+    ".*_hip_roll_joint",
+    ".*_hip_yaw_joint",
+    ".*_knee_joint",
+    ".*_ankle_pitch_joint",
+    ".*_ankle_roll_joint",
+  ),
+  network_file=str(ASIMOV_LEARNED_ACTUATOR_PATH),
+  pos_scale=1.0,    # Network trained with (target - current), matches mjlab
+  vel_scale=1.0,
+  torque_scale=1.0,
+  input_order="pos_vel",
+  history_length=3,
+  # Max effort from hip_roll (90 Nm).
+  saturation_effort=90.0,
+  velocity_limit=32.0,
+  effort_limit=90.0,
+  # Average armature across joint types.
+  armature=REFLECTED_INERTIA["hip_pitch"],
 )
 
 ##
@@ -262,7 +266,18 @@ ASIMOV_ARTICULATION = EntityArticulationInfoCfg(
     ASIMOV_ACTUATOR_HIP_ROLL,
     ASIMOV_ACTUATOR_HIP_YAW,
     ASIMOV_ACTUATOR_KNEE,
+    ASIMOV_ACTUATOR_ANKLE_PITCH,
+    ASIMOV_ACTUATOR_ANKLE_ROLL,
     ASIMOV_TOE_ACTUATOR,
+  ),
+  soft_joint_pos_limit_factor=0.9,
+)
+
+# Learned actuator articulation (replaces builtin PD with learned network).
+ASIMOV_ARTICULATION_LEARNED = EntityArticulationInfoCfg(
+  actuators=(
+    ASIMOV_LEARNED_ACTUATOR_CFG,
+    ASIMOV_TOE_ACTUATOR,  # Keep toe as builtin (passive spring)
   ),
   soft_joint_pos_limit_factor=0.9,
 )
@@ -282,21 +297,35 @@ def get_asimov_robot_cfg() -> EntityCfg:
   )
 
 
+def get_asimov_robot_cfg_learned() -> EntityCfg:
+  """Get Asimov robot with learned actuator network.
+
+  Uses a trained MLP to predict torques from joint state history.
+  Train the network using: python scripts/train_asimov_actuator.py
+
+  Returns:
+    EntityCfg configured with learned actuator model.
+  """
+  return EntityCfg(
+    init_state=KNEES_BENT_KEYFRAME,
+    collisions=(FEET_ONLY_COLLISION,),
+    spec_fn=get_spec,
+    articulation=ASIMOV_ARTICULATION_LEARNED,
+  )
+
+
 # Compute action scales for each joint
-# Using 0.3 multiplier (vs 0.25 for G1) due to lighter mass and different kinematics
+# Using 0.25 multiplier (same as G1) for stable control on lighter robot
 ASIMOV_ACTION_SCALE: dict[str, float] = {}
 for a in ASIMOV_ARTICULATION.actuators:
+  assert isinstance(a, BuiltinPositionActuatorCfg)
   e = a.effort_limit
   s = a.stiffness
   names = a.joint_names_expr
-  if not isinstance(e, dict):
-    e = {n: e for n in names}
-  if not isinstance(s, dict):
-    s = {n: s for n in names}
+  assert e is not None
   for n in names:
-    if n in e and n in s and s[n]:
-      # 0.25 multiplier (same as G1) for stable control on lighter robot
-      ASIMOV_ACTION_SCALE[n] = 0.25 * e[n] / s[n]
+    # 0.25 multiplier (same as G1) for stable control on lighter robot
+    ASIMOV_ACTION_SCALE[n] = 0.25 * e / s
 
 if __name__ == "__main__":
   import mujoco.viewer as viewer

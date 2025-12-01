@@ -6,12 +6,13 @@ import mujoco
 
 from mjlab import MJLAB_SRC_PATH
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
+from mjlab.actuator import BuiltinPositionActuatorCfg
 from mjlab.utils.actuator import (
   ElectricActuator,
   reflected_inertia_from_two_stage_planetary,
 )
 from mjlab.utils.os import update_assets
-from mjlab.utils.spec_config import ActuatorCfg, CollisionCfg
+from mjlab.utils.spec_config import CollisionCfg
 
 ##
 # MJCF and assets.
@@ -116,7 +117,7 @@ DAMPING_5020 = 2.0 * DAMPING_RATIO * ARMATURE_5020 * NATURAL_FREQ
 
 # Asimov joint actuator configuration
 # Hip pitch and hip yaw use 7520_14 actuators
-ASIMOV_ACTUATOR_HIP_PITCH_YAW = ActuatorCfg(
+ASIMOV_ACTUATOR_HIP_PITCH_YAW = BuiltinPositionActuatorCfg(
   joint_names_expr=(".*_hip_pitch_joint", ".*_hip_yaw_joint"),
   effort_limit=ACTUATOR_7520_14.effort_limit,
   armature=ACTUATOR_7520_14.reflected_inertia,
@@ -125,7 +126,7 @@ ASIMOV_ACTUATOR_HIP_PITCH_YAW = ActuatorCfg(
 )
 
 # Hip roll and knee use 7520_22 actuators (more powerful)
-ASIMOV_ACTUATOR_HIP_ROLL_KNEE = ActuatorCfg(
+ASIMOV_ACTUATOR_HIP_ROLL_KNEE = BuiltinPositionActuatorCfg(
   joint_names_expr=(".*_hip_roll_joint", ".*_knee_joint"),
   effort_limit=ACTUATOR_7520_22.effort_limit,
   armature=ACTUATOR_7520_22.reflected_inertia,
@@ -134,7 +135,7 @@ ASIMOV_ACTUATOR_HIP_ROLL_KNEE = ActuatorCfg(
 )
 
 # Ankle joints - using doubled 5020 actuators for parallel linkage
-ASIMOV_ACTUATOR_ANKLE = ActuatorCfg(
+ASIMOV_ACTUATOR_ANKLE = BuiltinPositionActuatorCfg(
   joint_names_expr=(".*_ankle_pitch_joint", ".*_ankle_roll_joint"),
   effort_limit=ACTUATOR_5020.effort_limit * 2,
   armature=ACTUATOR_5020.reflected_inertia * 2,
@@ -256,17 +257,14 @@ def get_asimov_robot_cfg() -> EntityCfg:
 # Using 0.3 multiplier (vs 0.25 for G1) due to lighter mass and different kinematics
 ASIMOV_ACTION_SCALE: dict[str, float] = {}
 for a in ASIMOV_ARTICULATION.actuators:
+  assert isinstance(a, BuiltinPositionActuatorCfg)
   e = a.effort_limit
   s = a.stiffness
   names = a.joint_names_expr
-  if not isinstance(e, dict):
-    e = {n: e for n in names}
-  if not isinstance(s, dict):
-    s = {n: s for n in names}
+  assert e is not None
   for n in names:
-    if n in e and n in s and s[n]:
-      # 0.3 multiplier (vs G1's 0.25) for more responsive control on lighter robot
-      ASIMOV_ACTION_SCALE[n] = 0.3 * e[n] / s[n]
+    # 0.3 multiplier (vs G1's 0.25) for more responsive control on lighter robot
+    ASIMOV_ACTION_SCALE[n] = 0.3 * e / s
 
 if __name__ == "__main__":
   import mujoco.viewer as viewer

@@ -5,12 +5,10 @@ from typing import TYPE_CHECKING
 import torch
 
 from mjlab.managers.action_manager import ActionTerm
-from mjlab.third_party.isaaclab.isaaclab.utils.string import (
-  resolve_matching_names_values,
-)
+from mjlab.utils.lab_api.string import resolve_matching_names_values
 
 if TYPE_CHECKING:
-  from mjlab.envs.manager_based_env import ManagerBasedEnv
+  from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv as ManagerBasedEnv
   from mjlab.envs.mdp.actions.actions_config import AnklePrToTendonActionCfg
 
 
