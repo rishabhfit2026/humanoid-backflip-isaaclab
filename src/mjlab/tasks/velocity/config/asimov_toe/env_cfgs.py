@@ -5,10 +5,7 @@ from mjlab.asset_zoo.robots.asimov.asimov_toe_constants import (
   get_asimov_robot_cfg,
 )
 from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.envs.mdp.actions import (
-  AnklePrToTendonActionCfg,
-  JointPositionActionCfg,
-)
+from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.manager_term_config import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
@@ -63,46 +60,19 @@ def asimov_toe_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   if cfg.scene.terrain is not None and cfg.scene.terrain.terrain_generator is not None:
     cfg.scene.terrain.terrain_generator.curriculum = True
 
-  # Split action scales:
-  # - non_ankle_toe: for hip/knee only (joint_pos)
-  # - ankles_only: for ankle pitch/roll inputs (ankle_ab)
-  action_scale_non_ankle_toe = {
-    k: v for k, v in ASIMOV_ACTION_SCALE.items() if ("ankle" not in k and "toe" not in k)
-  }
-  action_scale_ankles_only = {
-    k: v for k, v in ASIMOV_ACTION_SCALE.items() if ("ankle" in k)
+  # Action scales for all joints except toes (12 DOF: hip/knee/ankle)
+  action_scale_no_toe = {
+    k: v for k, v in ASIMOV_ACTION_SCALE.items() if "toe" not in k
   }
 
-  # Override actions to use ankle PR->AB mechanism and exclude ankles/toes from joint_pos.
-  # - joint_pos controls all actuators except ankle and toe joints
-  # - ankle_ab maps [L_pitch, L_roll, R_pitch, R_roll] -> [L_A, L_B, R_A, R_B]
+  # Direct joint position control for all actuators except toes
   cfg.actions = {
     "joint_pos": JointPositionActionCfg(
       asset_name="robot",
-      actuator_names=(r"^(?!.*(ankle|toe)).*$",),  # exclude ankles and toes
-      scale=action_scale_non_ankle_toe,
+      actuator_names=(r"^(?!.*toe).*$",),  # exclude only toes
+      scale=action_scale_no_toe,
       use_default_offset=True,
       preserve_order=True,
-    ),
-    "ankle_ab": AnklePrToTendonActionCfg(
-      asset_name="robot",
-      # Inputs (PR) identified via joint names for scaling/offsets
-      left_pitch_joint="left_ankle_pitch_joint",
-      left_roll_joint="left_ankle_roll_joint",
-      right_pitch_joint="right_ankle_pitch_joint",
-      right_roll_joint="right_ankle_roll_joint",
-      # Outputs applied to tendon actuators defined in XML
-      left_tendon_A="left_ankle_A",
-      left_tendon_B="left_ankle_B",
-      right_tendon_A="right_ankle_A",
-      right_tendon_B="right_ankle_B",
-      # Optional scaling/offset on PR inputs (use ankle scales)
-      scale=action_scale_ankles_only,
-      offset=0.0,
-      use_default_offset=True,
-      # Geometry mapping parameters based on foot geometry
-      L=0.04,
-      d=0.02,
     ),
   }
 
