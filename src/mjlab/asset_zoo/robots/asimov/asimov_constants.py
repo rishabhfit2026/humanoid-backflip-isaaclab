@@ -1,16 +1,23 @@
-"""Asimov bipedal robot constants."""
+"""Asimov robot constants.
+
+Asimov is a 12-DOF bipedal robot with 6 joints per leg:
+- hip_pitch, hip_roll, hip_yaw, knee, ankle_pitch, ankle_roll
+
+Motor specifications from Synapticon datasheets:
+- Hip pitch: EC-A6416-P2-25 (peak 120 Nm, rated 55 Nm)
+- Hip roll: EC-A5013-H17-100 (peak 90 Nm, rated 45 Nm)
+- Hip yaw: EC-A3814-H14-107 (peak 60 Nm, rated 30 Nm)
+- Knee: EC-A4315-P2-36 (peak 75 Nm, rated 50 Nm)
+- Ankle pitch/roll: EC-A4310-P2-36 (peak 36 Nm, rated 18 Nm)
+"""
 
 from pathlib import Path
 
 import mujoco
 
 from mjlab import MJLAB_SRC_PATH
-from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.actuator import BuiltinPositionActuatorCfg
-from mjlab.utils.actuator import (
-  ElectricActuator,
-  reflected_inertia_from_two_stage_planetary,
-)
+from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.utils.os import update_assets
 from mjlab.utils.spec_config import CollisionCfg
 
@@ -19,210 +26,173 @@ from mjlab.utils.spec_config import CollisionCfg
 ##
 
 ASIMOV_XML: Path = (
-  MJLAB_SRC_PATH / "asset_zoo" / "robots" / "asimov" / "xmls" / "asimov.xml"
+    MJLAB_SRC_PATH / "asset_zoo" / "robots" / "asimov" / "xmls" / "asimov.xml"
 )
-assert ASIMOV_XML.exists()
+assert ASIMOV_XML.exists(), f"Asimov XML not found at {ASIMOV_XML}"
+
+ASIMOV_WALKING_REFERENCE: Path = (
+    MJLAB_SRC_PATH / "asset_zoo" / "robots" / "asimov" / "assets" / "walking_reference.csv"
+)
 
 
 def get_assets(meshdir: str) -> dict[str, bytes]:
-  assets: dict[str, bytes] = {}
-  update_assets(assets, ASIMOV_XML.parent / "assets", meshdir)
-  return assets
+    assets: dict[str, bytes] = {}
+    update_assets(assets, ASIMOV_XML.parent.parent / "assets" / "meshes", meshdir)
+    return assets
 
 
 def get_spec() -> mujoco.MjSpec:
-  spec = mujoco.MjSpec.from_file(str(ASIMOV_XML))
-  spec.assets = get_assets(spec.meshdir)
-  return spec
+    spec = mujoco.MjSpec.from_file(str(ASIMOV_XML))
+    spec.assets = get_assets(spec.meshdir)
+    return spec
 
 
 ##
 # Actuator config.
+#
+# Using physics-based PD gains:
+# KP = J_reflected * omega_n^2 (with omega_n = 10 Hz * 2*pi)
+# KD = 5.0 Nm·s/rad (hardware max for all motors)
 ##
 
-# Motor specs - Using same motors as Booster T1 / Unitree G1 legs
-# Based on 7520 series actuators used in leg joints
+NATURAL_FREQ = 10 * 2.0 * 3.1415926535  # 10Hz
+DAMPING_RATIO = 2.0
 
-ROTOR_INERTIAS_7520_14 = (
-  0.489e-4,
-  0.098e-4,
-  0.533e-4,
-)
-GEARS_7520_14 = (
-  1,
-  4.5,
-  1 + (48 / 22),
-)
-ARMATURE_7520_14 = reflected_inertia_from_two_stage_planetary(
-  ROTOR_INERTIAS_7520_14, GEARS_7520_14
-)
+# Reflected inertias from motor spec sheets (J_rotor * gear_ratio^2)
+# Hip pitch: 104.395 kg·mm² * 25² = 0.0652 kg·m²
+# Hip roll: 10 kg·mm² * 100² = 0.100 kg·m²
+# Hip yaw: 3 kg·mm² * 107² = 0.0343 kg·m²
+# Knee: 25.5 kg·mm² * 36² = 0.0330 kg·m²
+# Ankle: 18.2 kg·mm² * 36² = 0.0236 kg·m²
+ARMATURE_HIP_PITCH = 0.0652
+ARMATURE_HIP_ROLL = 0.100
+ARMATURE_HIP_YAW = 0.0343
+ARMATURE_KNEE = 0.0330
+ARMATURE_ANKLE_PITCH = 0.0236
+ARMATURE_ANKLE_ROLL = 0.0236
 
-ROTOR_INERTIAS_7520_22 = (
-  0.489e-4,
-  0.109e-4,
-  0.738e-4,
-)
-GEARS_7520_22 = (
-  1,
-  4.5,
-  5,
-)
-ARMATURE_7520_22 = reflected_inertia_from_two_stage_planetary(
-  ROTOR_INERTIAS_7520_22, GEARS_7520_22
-)
+# Stiffness (KP) - physics based
+STIFFNESS_HIP_PITCH = ARMATURE_HIP_PITCH * NATURAL_FREQ**2
+STIFFNESS_HIP_ROLL = ARMATURE_HIP_ROLL * NATURAL_FREQ**2
+STIFFNESS_HIP_YAW = ARMATURE_HIP_YAW * NATURAL_FREQ**2
+STIFFNESS_KNEE = ARMATURE_KNEE * NATURAL_FREQ**2
+STIFFNESS_ANKLE_PITCH = ARMATURE_ANKLE_PITCH * NATURAL_FREQ**2
+STIFFNESS_ANKLE_ROLL = ARMATURE_ANKLE_ROLL * NATURAL_FREQ**2
 
-# Ankle actuators - using similar specs as 5020 actuators but doubled for parallel linkage
-ROTOR_INERTIAS_5020 = (
-  0.139e-4,
-  0.017e-4,
-  0.169e-4,
-)
-GEARS_5020 = (
-  1,
-  1 + (46 / 18),
-  1 + (56 / 16),
-)
-ARMATURE_5020 = reflected_inertia_from_two_stage_planetary(
-  ROTOR_INERTIAS_5020, GEARS_5020
-)
+# Damping (KD) - capped at hardware max 5.0 Nm·s/rad for sim2real
+DAMPING_HIP_PITCH = 5.0
+DAMPING_HIP_ROLL = 5.0
+DAMPING_HIP_YAW = 5.0
+DAMPING_KNEE = 5.0
+DAMPING_ANKLE = 5.0
 
-ACTUATOR_7520_14 = ElectricActuator(
-  reflected_inertia=ARMATURE_7520_14,
-  velocity_limit=32.0,
-  effort_limit=88.0,
-)
-ACTUATOR_7520_22 = ElectricActuator(
-  reflected_inertia=ARMATURE_7520_22,
-  velocity_limit=20.0,
-  effort_limit=139.0,
-)
-ACTUATOR_5020 = ElectricActuator(
-  reflected_inertia=ARMATURE_5020,
-  velocity_limit=37.0,
-  effort_limit=25.0,
+# Effort limits (peak torque from datasheets)
+EFFORT_HIP_PITCH = 120.0  # EC-A6416-P2-25: peak 120 Nm
+EFFORT_HIP_ROLL = 90.0    # EC-A5013-H17-100: peak 90 Nm
+EFFORT_HIP_YAW = 60.0     # EC-A3814-H14-107: peak 60 Nm
+EFFORT_KNEE = 75.0        # EC-A4315-P2-36: peak 75 Nm
+EFFORT_ANKLE = 36.0       # EC-A4310-P2-36: peak 36 Nm
+
+ASIMOV_ACTUATOR_HIP_PITCH = BuiltinPositionActuatorCfg(
+    joint_names_expr=(".*_hip_pitch_joint",),
+    stiffness=STIFFNESS_HIP_PITCH,
+    damping=DAMPING_HIP_PITCH,
+    effort_limit=EFFORT_HIP_PITCH,
+    armature=ARMATURE_HIP_PITCH,
 )
 
-# Lower natural frequency for lighter robot (50% mass of T1)
-# This reduces stiffness and makes control smoother
-NATURAL_FREQ = 8 * 2.0 * 3.1415926535  # 8Hz (was 10Hz for G1)
-DAMPING_RATIO = 1.8  # Slightly lower for lighter robot
-
-STIFFNESS_7520_14 = ARMATURE_7520_14 * NATURAL_FREQ**2
-STIFFNESS_7520_22 = ARMATURE_7520_22 * NATURAL_FREQ**2
-STIFFNESS_5020 = ARMATURE_5020 * NATURAL_FREQ**2
-
-DAMPING_7520_14 = 2.0 * DAMPING_RATIO * ARMATURE_7520_14 * NATURAL_FREQ
-DAMPING_7520_22 = 2.0 * DAMPING_RATIO * ARMATURE_7520_22 * NATURAL_FREQ
-DAMPING_5020 = 2.0 * DAMPING_RATIO * ARMATURE_5020 * NATURAL_FREQ
-
-# Asimov joint actuator configuration
-# Hip pitch and hip yaw use 7520_14 actuators
-ASIMOV_ACTUATOR_HIP_PITCH_YAW = BuiltinPositionActuatorCfg(
-  joint_names_expr=(".*_hip_pitch_joint", ".*_hip_yaw_joint"),
-  effort_limit=ACTUATOR_7520_14.effort_limit,
-  armature=ACTUATOR_7520_14.reflected_inertia,
-  stiffness=STIFFNESS_7520_14,
-  damping=DAMPING_7520_14,
+ASIMOV_ACTUATOR_HIP_ROLL = BuiltinPositionActuatorCfg(
+    joint_names_expr=(".*_hip_roll_joint",),
+    stiffness=STIFFNESS_HIP_ROLL,
+    damping=DAMPING_HIP_ROLL,
+    effort_limit=EFFORT_HIP_ROLL,
+    armature=ARMATURE_HIP_ROLL,
 )
 
-# Hip roll and knee use 7520_22 actuators (more powerful)
-ASIMOV_ACTUATOR_HIP_ROLL_KNEE = BuiltinPositionActuatorCfg(
-  joint_names_expr=(".*_hip_roll_joint", ".*_knee_joint"),
-  effort_limit=ACTUATOR_7520_22.effort_limit,
-  armature=ACTUATOR_7520_22.reflected_inertia,
-  stiffness=STIFFNESS_7520_22,
-  damping=DAMPING_7520_22,
+ASIMOV_ACTUATOR_HIP_YAW = BuiltinPositionActuatorCfg(
+    joint_names_expr=(".*_hip_yaw_joint",),
+    stiffness=STIFFNESS_HIP_YAW,
+    damping=DAMPING_HIP_YAW,
+    effort_limit=EFFORT_HIP_YAW,
+    armature=ARMATURE_HIP_YAW,
 )
 
-# Ankle joints - using doubled 5020 actuators for parallel linkage
+ASIMOV_ACTUATOR_KNEE = BuiltinPositionActuatorCfg(
+    joint_names_expr=(".*_knee_joint",),
+    stiffness=STIFFNESS_KNEE,
+    damping=DAMPING_KNEE,
+    effort_limit=EFFORT_KNEE,
+    armature=ARMATURE_KNEE,
+)
+
 ASIMOV_ACTUATOR_ANKLE = BuiltinPositionActuatorCfg(
-  joint_names_expr=(".*_ankle_pitch_joint", ".*_ankle_roll_joint"),
-  effort_limit=ACTUATOR_5020.effort_limit * 2,
-  armature=ACTUATOR_5020.reflected_inertia * 2,
-  stiffness=STIFFNESS_5020 * 2,
-  damping=DAMPING_5020 * 2,
+    joint_names_expr=(".*_ankle_pitch_joint", ".*_ankle_roll_joint"),
+    stiffness=STIFFNESS_ANKLE_PITCH,
+    damping=DAMPING_ANKLE,
+    effort_limit=EFFORT_ANKLE,
+    armature=ARMATURE_ANKLE_PITCH,
 )
 
 ##
 # Keyframe config.
 ##
 
-# Default standing pose for Asimov (legs straight)
-STANDING_KEYFRAME = EntityCfg.InitialStateCfg(
-  pos=(0, 0, 0.709),  # From XML: base height
-  joint_pos={
-    ".*_hip_pitch_joint": 0.0,
-    ".*_hip_roll_joint": 0.0,
-    ".*_hip_yaw_joint": 0.0,
-    "left_knee_joint": 0.0,   # Left: 0 = straight
-    "right_knee_joint": 0.0,  # Right: 0 = straight (both at neutral)
-    ".*_ankle_pitch_joint": 0.0,
-    ".*_ankle_roll_joint": 0.0,
-  },
-  joint_vel={".*": 0.0},
+HOME_KEYFRAME = EntityCfg.InitialStateCfg(
+    pos=(0, 0, 0.75),  # Standing height (~0.72m + margin)
+    joint_pos={".*": 0.0},  # All joints at zero = straight standing
+    joint_vel={".*": 0.0},
 )
 
 # Knees bent pose for stability
 # NOTE: Left and right sides have OPPOSITE axis directions!
 # Knees:
-# - Left knee: axis=(0, -1, 0), range=[-2, 0.09] → negative = extend back
-# - Right knee: axis=(0, 1, 0), range=[-0.09, 2] → positive = extend back
+# - Left knee: axis=(0, 1, 0), range=[0, 1.5] → positive = extend back
+# - Right knee: axis=(0, -1, 0), range=[-1.5, 0] → negative = extend back
+# Hip pitch:
+# - Left: axis=(0, 0.707, -0.707) → positive = forward lean
+# - Right: axis=(0, -0.707, -0.707) → negative = forward lean
 # Ankle pitch:
-# - Left ankle: axis=(0, 1, 0) → positive = pitch up
-# - Right ankle: axis=(0, -1, 0) → negative = pitch up
+# - Left: axis=(0, 1, 0) → negative = pitch down
+# - Right: axis=(0, -1, 0) → positive = pitch down
 KNEES_BENT_KEYFRAME = EntityCfg.InitialStateCfg(
-  pos=(0, 0, 0.73),  # Match booster_gym height
-  joint_pos={
-    # Based on proven booster_gym Asimov_unitree.yaml config
-    "left_hip_pitch_joint": 0.2,      # More upright than G1
-    "right_hip_pitch_joint": -0.2,    # Opposite due to canted axis
-    ".*_hip_roll_joint": 0.0,
-    ".*_hip_yaw_joint": 0.0,
-    "left_knee_joint": -0.4,          # Left: negative = extend backwards
-    "right_knee_joint": 0.4,          # Right: positive = extend backwards
-    "left_ankle_pitch_joint": -0.25,  # From v1.yaml config
-    "right_ankle_pitch_joint": 0.25,  # Opposite axis
-    ".*_ankle_roll_joint": 0.0,
-  },
-  joint_vel={".*": 0.0},
+    pos=(0, 0, 0.70),  # Lower height for bent knees
+    joint_pos={
+        "left_hip_pitch_joint": 0.0,
+        "right_hip_pitch_joint": 0.0,
+        ".*_hip_roll_joint": 0.0,
+        ".*_hip_yaw_joint": 0.0,
+        "left_knee_joint": 0.4,    # [0, 1.5] range
+        "right_knee_joint": -0.4,  # [-1.5, 0] range
+        "left_ankle_pitch_joint": -0.2,   # Compensate for knee bend
+        "right_ankle_pitch_joint": 0.2,   # Opposite sign
+        ".*_ankle_roll_joint": 0.0,
+    },
+    joint_vel={".*": 0.0},
 )
 
 ##
 # Collision config.
 ##
 
-# Enable all collisions including self collisions
-# Feet get condim=3, other parts get condim=1
+# Full collision including self-collisions
 FULL_COLLISION = CollisionCfg(
-  geom_names_expr=(".*_collision",),
-  condim={
-    r"^(left|right)_ankle_roll_link_collision$": 3,
-    ".*_collision": 1
-  },
-  priority={r"^(left|right)_ankle_roll_link_collision$": 1},
-  friction={r"^(left|right)_ankle_roll_link_collision$": (0.8,)},
+    geom_names_expr=(".*_collision",),
+    condim={
+        r"^(left|right)_ankle_roll_link_collision$": 3,
+        ".*_collision": 1,
+    },
+    priority={r"^(left|right)_ankle_roll_link_collision$": 1},
+    friction={r"^(left|right)_ankle_roll_link_collision$": (0.6,)},
 )
 
-FULL_COLLISION_WITHOUT_SELF = CollisionCfg(
-  geom_names_expr=(".*_collision",),
-  contype=0,
-  conaffinity=1,
-  condim={
-    r"^(left|right)_ankle_roll_link_collision$": 3,
-    ".*_collision": 1
-  },
-  priority={r"^(left|right)_ankle_roll_link_collision$": 1},
-  friction={r"^(left|right)_ankle_roll_link_collision$": (0.8,)},
-)
-
-# Only feet collision enabled (recommended for initial training)
+# Feet only collision (disable self-collision)
 FEET_ONLY_COLLISION = CollisionCfg(
-  geom_names_expr=(r"^(left|right)_ankle_roll_link_collision$",),
-  contype=0,
-  conaffinity=1,
-  condim=3,
-  priority=1,
-  friction=(0.8,),
+    geom_names_expr=(r"^(left|right)_ankle_roll_link_collision$",),
+    contype=0,
+    conaffinity=1,
+    condim=3,
+    priority=1,
+    friction=(0.6,),
 )
 
 ##
@@ -230,47 +200,50 @@ FEET_ONLY_COLLISION = CollisionCfg(
 ##
 
 ASIMOV_ARTICULATION = EntityArticulationInfoCfg(
-  actuators=(
-    ASIMOV_ACTUATOR_HIP_PITCH_YAW,
-    ASIMOV_ACTUATOR_HIP_ROLL_KNEE,
-    ASIMOV_ACTUATOR_ANKLE,
-  ),
-  soft_joint_pos_limit_factor=0.9,
+    actuators=(
+        ASIMOV_ACTUATOR_HIP_PITCH,
+        ASIMOV_ACTUATOR_HIP_ROLL,
+        ASIMOV_ACTUATOR_HIP_YAW,
+        ASIMOV_ACTUATOR_KNEE,
+        ASIMOV_ACTUATOR_ANKLE,
+    ),
+    soft_joint_pos_limit_factor=0.9,
 )
 
 
 def get_asimov_robot_cfg() -> EntityCfg:
-  """Get a fresh Asimov robot configuration instance.
+    """Get a fresh Asimov robot configuration instance.
 
-  Returns a new EntityCfg instance each time to avoid mutation issues when
-  the config is shared across multiple places.
-  """
-  return EntityCfg(
-    init_state=KNEES_BENT_KEYFRAME,
-    collisions=(FEET_ONLY_COLLISION,),
-    spec_fn=get_spec,
-    articulation=ASIMOV_ARTICULATION,
-  )
+    Returns a new EntityCfg instance each time to avoid mutation issues when
+    the config is shared across multiple places.
+    """
+    return EntityCfg(
+        init_state=HOME_KEYFRAME,
+        collisions=(FEET_ONLY_COLLISION,),
+        spec_fn=get_spec,
+        articulation=ASIMOV_ARTICULATION,
+    )
 
 
-# Compute action scales for each joint
-# Using 0.3 multiplier (vs 0.25 for G1) due to lighter mass and different kinematics
+# Action scale: how much the action scales joint position target
+# Using 0.3 * effort_limit / stiffness (like asimov-mjlab)
 ASIMOV_ACTION_SCALE: dict[str, float] = {}
 for a in ASIMOV_ARTICULATION.actuators:
-  assert isinstance(a, BuiltinPositionActuatorCfg)
-  e = a.effort_limit
-  s = a.stiffness
-  names = a.joint_names_expr
-  assert e is not None
-  for n in names:
-    # 0.3 multiplier (vs G1's 0.25) for more responsive control on lighter robot
-    ASIMOV_ACTION_SCALE[n] = 0.3 * e / s
+    assert isinstance(a, BuiltinPositionActuatorCfg)
+    e = a.effort_limit
+    s = a.stiffness
+    names = a.joint_names_expr
+    assert e is not None
+    assert s is not None
+    for n in names:
+        ASIMOV_ACTION_SCALE[n] = 0.3 * e / s
+
 
 if __name__ == "__main__":
-  import mujoco.viewer as viewer
+    import mujoco.viewer as viewer
 
-  from mjlab.entity.entity import Entity
+    from mjlab.entity.entity import Entity
 
-  robot = Entity(get_asimov_robot_cfg())
+    robot = Entity(get_asimov_robot_cfg())
 
-  viewer.launch(robot.spec.compile())
+    viewer.launch(robot.spec.compile())

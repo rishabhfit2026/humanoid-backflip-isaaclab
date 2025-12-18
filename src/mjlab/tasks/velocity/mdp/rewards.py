@@ -288,6 +288,159 @@ def soft_landing(
   return cost
 
 
+class alternating_feet_contact:
+  """Reward alternating foot contacts to encourage walking gait.
+
+  Tracks a gait phase (0 to 1) and rewards:
+  - Left foot in air when phase is 0.0-0.5
+  - Right foot in air when phase is 0.5-1.0
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    self.gait_phase = torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+    self.gait_frequency = cfg.params.get("gait_frequency", 1.5)  # Hz
+    self.step_dt = env.step_dt
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str,
+    command_threshold: float = 0.1,
+    gait_frequency: float = 1.5,
+  ) -> torch.Tensor:
+    contact_sensor: ContactSensor = env.scene[sensor_name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+
+    # Update gait phase
+    self.gait_phase = torch.fmod(self.gait_phase + self.step_dt * gait_frequency, 1.0)
+
+    # Check foot contact (assume 2 feet: left=0, right=1)
+    assert contact_sensor.data.found is not None
+    in_contact = contact_sensor.data.found > 0  # [B, 2]
+    left_contact = in_contact[:, 0]
+    right_contact = in_contact[:, 1]
+
+    # Desired: left swing (not contact) when phase 0.0-0.5, right swing when 0.5-1.0
+    left_should_swing = self.gait_phase < 0.5
+    right_should_swing = self.gait_phase >= 0.5
+
+    # Reward when foot is in air at the right time
+    left_reward = (left_should_swing & ~left_contact).float()
+    right_reward = (right_should_swing & ~right_contact).float()
+    reward = left_reward + right_reward
+
+    # Only apply when moving
+    linear_norm = torch.norm(command[:, :2], dim=1)
+    angular_norm = torch.abs(command[:, 2])
+    total_command = linear_norm + angular_norm
+    active = (total_command > command_threshold).float()
+    reward = reward * active
+
+    # Reset phase on episode reset
+    reset_ids = env.termination_manager.terminated.nonzero(as_tuple=False).flatten()
+    if len(reset_ids) > 0:
+      self.gait_phase[reset_ids] = torch.rand(len(reset_ids), device=env.device)
+
+    return reward
+
+
+class imitation_joint_pos:
+  """Reward for tracking reference joint positions from imitation data.
+
+  Loads cyclic walking trajectory from CSV and rewards matching the reference
+  pose based on gait phase computed from velocity command.
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    import numpy as np
+    import os
+
+    self.step_dt = env.step_dt
+    self.gait_phase = torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+
+    # Load imitation data
+    data_path = cfg.params.get("data_path", None)
+    if data_path is None or not os.path.exists(data_path):
+      print(f"[WARNING] Imitation data not found at {data_path}, reward disabled")
+      self.enabled = False
+      self.ref_joint_pos = None
+      return
+
+    self.enabled = True
+    data = np.loadtxt(data_path, delimiter=",", skiprows=1)
+    # First 12 columns are joint positions
+    ref_joint_pos = data[:, :12]
+    self.ref_joint_pos = torch.tensor(ref_joint_pos, device=env.device, dtype=torch.float32)
+    self.num_frames = self.ref_joint_pos.shape[0]
+    self.gait_frequency = cfg.params.get("gait_frequency", 1.25)  # Hz
+    print(f"[INFO] Loaded imitation data: {self.num_frames} frames at {self.gait_frequency} Hz")
+
+    # Joint mapping from CSV to mjlab order
+    # CSV order: L_hip_pitch, R_hip_pitch, L_hip_roll, R_hip_roll, L_hip_yaw, R_hip_yaw,
+    #            L_knee, R_knee, L_ankle_pitch, R_ankle_pitch, L_ankle_roll, R_ankle_roll
+    # mjlab order: L_hip_pitch, L_hip_roll, L_hip_yaw, L_knee, L_ankle_pitch, L_ankle_roll,
+    #              R_hip_pitch, R_hip_roll, R_hip_yaw, R_knee, R_ankle_pitch, R_ankle_roll
+    # For mjlab[i], which CSV index to use:
+    # mjlab[0]=CSV[0], mjlab[1]=CSV[2], mjlab[2]=CSV[4], mjlab[3]=CSV[6], mjlab[4]=CSV[8], mjlab[5]=CSV[10]
+    # mjlab[6]=CSV[1], mjlab[7]=CSV[3], mjlab[8]=CSV[5], mjlab[9]=CSV[7], mjlab[10]=CSV[9], mjlab[11]=CSV[11]
+    csv_to_mjlab = [0, 2, 4, 6, 8, 10, 1, 3, 5, 7, 9, 11]
+    self.ref_joint_pos_reordered = self.ref_joint_pos[:, csv_to_mjlab].clone()
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    data_path: str,
+    gait_frequency: float,
+    std: float,
+    command_name: str,
+    command_threshold: float = 0.1,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  ) -> torch.Tensor:
+    del data_path  # Used in __init__
+
+    if not self.enabled:
+      return torch.zeros(env.num_envs, device=env.device)
+
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+
+    # Update gait phase based on velocity
+    linear_speed = torch.norm(command[:, :2], dim=1)
+    angular_speed = torch.abs(command[:, 2])
+    total_speed = linear_speed + angular_speed
+    active = (total_speed > command_threshold).float()
+
+    # Advance phase proportional to speed
+    phase_delta = self.step_dt * gait_frequency * (total_speed / 0.5).clamp(min=0.5, max=2.0)
+    self.gait_phase = torch.fmod(self.gait_phase + phase_delta, 1.0)
+
+    # Get frame index from phase
+    frame_idx = (self.gait_phase * self.num_frames).long() % self.num_frames
+
+    # Get reference joint positions for each env
+    ref_pos = self.ref_joint_pos_reordered[frame_idx]  # [B, 12]
+
+    # Get current joint positions
+    current_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]  # [B, 12]
+
+    # Compute error
+    error_sq = torch.sum(torch.square(current_pos - ref_pos), dim=1)
+    reward = torch.exp(-error_sq / (std ** 2))
+
+    # Only apply when moving
+    reward = reward * active
+
+    # Reset phase on episode reset
+    reset_ids = env.termination_manager.terminated.nonzero(as_tuple=False).flatten()
+    if len(reset_ids) > 0:
+      self.gait_phase[reset_ids] = torch.rand(len(reset_ids), device=env.device)
+
+    return reward
+
+
 class variable_posture:
   """Penalize deviation from default pose, with tighter constraints when standing."""
 

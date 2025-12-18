@@ -1,5 +1,7 @@
 """Tests for entity module."""
 
+from dataclasses import dataclass
+
 import mujoco
 import numpy as np
 import pytest
@@ -8,6 +10,7 @@ from conftest import get_test_device
 
 from mjlab.actuator import BuiltinPositionActuatorCfg, XmlMotorActuatorCfg
 from mjlab.entity import Entity, EntityArticulationInfoCfg, EntityCfg
+from mjlab.scene import Scene, SceneCfg
 from mjlab.sim.sim import Simulation, SimulationCfg
 
 FIXED_BASE_XML = """
@@ -182,7 +185,7 @@ def create_floating_articulated_entity():
 def initialize_entity_with_sim(entity, device, num_envs=1):
   """Initialize an entity with a simulation."""
   model = entity.compile()
-  sim_cfg = SimulationCfg()
+  sim_cfg = SimulationCfg(njmax=75)
   sim = Simulation(num_envs=num_envs, cfg=sim_cfg, model=model, device=device)
   entity.initialize(model, sim.model, sim.data, device)
   return entity, sim
@@ -197,7 +200,7 @@ def initialize_entity_with_sim(entity, device, num_envs=1):
         "is_fixed_base": True,
         "is_articulated": False,
         "is_actuated": False,
-        "num_bodies": 1,
+        "num_bodies": 2,  # mocap_base wrapper + object
         "num_joints": 0,
         "num_actuators": 0,
       },
@@ -219,7 +222,7 @@ def initialize_entity_with_sim(entity, device, num_envs=1):
         "is_fixed_base": True,
         "is_articulated": True,
         "is_actuated": True,
-        "num_bodies": 3,
+        "num_bodies": 4,  # mocap_base wrapper + base + link1 + link2
         "num_joints": 2,
         "num_actuators": 2,
       },
@@ -379,7 +382,7 @@ def test_external_force_on_specific_body(device):
 
 
 def test_fixed_base_initial_position():
-  """Test fixed-base entity's initial pos/rot are applied to the body."""
+  """Test fixed-base entity's initial pos/rot are applied to the mocap wrapper."""
   cfg = EntityCfg(
     spec_fn=lambda: mujoco.MjSpec.from_string(FIXED_BASE_XML),
     init_state=EntityCfg.InitialStateCfg((1.0, 2.0, 3.0), (0.7071, 0.7071, 0.0, 0.0)),
@@ -387,9 +390,10 @@ def test_fixed_base_initial_position():
   entity = Entity(cfg)
   model = entity.compile()
 
-  body = model.body("object")
-  np.testing.assert_allclose(body.pos, [1.0, 2.0, 3.0], rtol=1e-6)
-  np.testing.assert_allclose(body.quat, [0.7071, 0.7071, 0.0, 0.0], atol=1e-4)
+  # init_state is applied to the auto-generated mocap_base wrapper body.
+  mocap_body = model.body("mocap_base")
+  np.testing.assert_allclose(mocap_body.pos, [1.0, 2.0, 3.0], rtol=1e-6)
+  np.testing.assert_allclose(mocap_body.quat, [0.7071, 0.7071, 0.0, 0.0], atol=1e-4)
 
 
 def test_keyframe_ctrl_maps_joint_pos_to_actuators():
@@ -566,3 +570,134 @@ def test_find_joints_by_actuator_names_returns_entity_local_indices():
   # Should return entity-local index [2], not subset-local [0].
   assert joint_names == ["joint_c"]
   assert joint_ids == [2]  # Index of joint_c in self.joint_names.
+
+
+@dataclass
+class CustomEntityCfg(EntityCfg):
+  """Custom entity config with additional fields."""
+
+  custom_threshold: float = 0.5
+
+  def build(self) -> "CustomEntity":
+    return CustomEntity(self)
+
+
+class CustomEntity(Entity):
+  """Custom entity with additional properties."""
+
+  cfg: CustomEntityCfg
+
+  @property
+  def custom_value(self) -> float:
+    """Custom property that uses config field."""
+    return self.cfg.custom_threshold * 2
+
+
+def test_custom_entity_subclass(device):
+  """Test that custom Entity subclasses work through the scene."""
+  scene_cfg = SceneCfg(
+    num_envs=1,
+    entities={
+      "custom": CustomEntityCfg(
+        spec_fn=lambda: mujoco.MjSpec.from_string(FIXED_BASE_XML),
+        custom_threshold=0.9,
+      ),
+    },
+  )
+  scene = Scene(scene_cfg, device)
+
+  # Scene should have instantiated our custom entity type.
+  custom_entity = scene.entities["custom"]
+  assert isinstance(custom_entity, CustomEntity)
+  assert custom_entity.cfg.custom_threshold == 0.9
+  assert custom_entity.custom_value == 1.8
+
+
+# ============================================================================
+# Keyframe Fallback Tests
+# ============================================================================
+
+XML_WITH_KEYFRAME = """
+<mujoco>
+  <worldbody>
+    <body name="robot">
+      <freejoint name="root"/>
+      <geom type="box" size="0.1 0.1 0.1"/>
+      <body name="link" pos="0.2 0 0">
+        <joint name="joint1" type="hinge" axis="0 1 0"/>
+        <geom type="box" size="0.05 0.05 0.05"/>
+      </body>
+    </body>
+  </worldbody>
+  <keyframe>
+    <key name="home" qpos="0 0 1 1 0 0 0 0.5"/>
+  </keyframe>
+</mujoco>
+"""
+
+XML_WITHOUT_KEYFRAME = """
+<mujoco>
+  <worldbody>
+    <body name="robot">
+      <freejoint name="root"/>
+      <geom type="box" size="0.1 0.1 0.1"/>
+      <body name="link" pos="0.2 0 0">
+        <joint name="joint1" type="hinge" axis="0 1 0"/>
+        <geom type="box" size="0.05 0.05 0.05"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+
+
+def test_joint_pos_none_uses_model_keyframe():
+  """Test that joint_pos=None uses the model's existing keyframe."""
+  cfg = EntityCfg(
+    init_state=EntityCfg.InitialStateCfg(joint_pos=None),
+    spec_fn=lambda: mujoco.MjSpec.from_string(XML_WITH_KEYFRAME),
+  )
+  entity = Entity(cfg)
+  model = entity.spec.compile()
+
+  assert model.nkey == 1
+  # Keyframe: qpos="0 0 1 1 0 0 0 0.5" (root pos/quat + joint1)
+  assert model.key(0).qpos[7] == 0.5  # joint1 position
+
+
+def test_joint_pos_none_errors_without_keyframe():
+  """Test that joint_pos=None raises error if model has no keyframe."""
+  cfg = EntityCfg(
+    init_state=EntityCfg.InitialStateCfg(joint_pos=None),
+    spec_fn=lambda: mujoco.MjSpec.from_string(XML_WITHOUT_KEYFRAME),
+  )
+  with pytest.raises(ValueError, match="requires the model to have a keyframe"):
+    Entity(cfg)
+
+
+XML_FIXED_BASE_WITH_KEYFRAME = """
+<mujoco>
+  <worldbody>
+    <body name="arm">
+      <joint name="joint1" type="hinge" axis="0 0 1"/>
+      <geom type="box" size="0.1 0.1 0.1"/>
+    </body>
+  </worldbody>
+  <keyframe>
+    <key name="home" qpos="0.5"/>
+  </keyframe>
+</mujoco>
+"""
+
+
+def test_joint_pos_none_fixed_base_uses_keyframe():
+  """Test that joint_pos=None works for fixed-base entities with keyframes."""
+  cfg = EntityCfg(
+    init_state=EntityCfg.InitialStateCfg(joint_pos=None),
+    spec_fn=lambda: mujoco.MjSpec.from_string(XML_FIXED_BASE_WITH_KEYFRAME),
+  )
+  entity = Entity(cfg)
+  model = entity.spec.compile()
+
+  assert model.nkey == 1
+  assert model.key(0).qpos[0] == 0.5
