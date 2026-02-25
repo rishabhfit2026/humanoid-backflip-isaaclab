@@ -23,7 +23,7 @@ Fork of [mujocolab/mjlab](https://github.com/mujocolab/mjlab) for the Humanoid b
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Clone and run
-git clone https://github.com/AhmedMD72/humanoid-mjlab.git
+git clone https://github.com/Sentient-X/humanoid-mjlab.git
 cd humanoid-mjlab
 uv sync
 ```
