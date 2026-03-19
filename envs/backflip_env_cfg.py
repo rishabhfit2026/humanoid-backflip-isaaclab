@@ -3,6 +3,10 @@ envs/backflip_env_cfg.py  —  humanoid_28dof.urdf
 =================================================
 Updated for Isaac Lab v2.3.2 with correct imports
 28 revolute DOF humanoid robot
+With domain randomization for Sim-to-Sim transfer to MuJoCo
+Run 6: Fixed value function explosion
+  landing_smoothness: -0.001 → -0.0001 (10x smaller to prevent explosion)
+  phase_backflip=1.5, jump_height=8.0, upright_after_land=10.0 (unchanged)
 """
 
 import isaaclab.sim as sim_utils
@@ -31,7 +35,12 @@ from isaaclab_rl.rsl_rl import (
 )
 
 import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
-from mdp.rewards import base_height_reward, base_ang_vel_reward, upright_posture_reward
+from mdp.rewards import (
+    base_height_reward,
+    base_ang_vel_reward,
+    upright_posture_reward,
+    phase_aware_backflip_reward,
+)
 
 
 @configclass
@@ -231,29 +240,45 @@ class ActionsCfg:
 
 @configclass
 class RewardsCfg:
-    alive = RewTerm(func=mdp.is_alive, weight=1.0)
+    # ── Main phase-aware backflip reward ──────────────────────────────────────
+    # weight=1.5 — kills spin-only reward hacking
+    phase_backflip = RewTerm(
+        func=phase_aware_backflip_reward, weight=1.5,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces"),
+            "asset_cfg":  SceneEntityCfg("robot"),
+        },
+    )
 
-    backflip_rotation = RewTerm(
-        func=base_ang_vel_reward, weight=8.0,
-        params={"axis": "y", "target_ang_vel": -6.0},
-    )
-    upright_after_land = RewTerm(
-        func=upright_posture_reward, weight=6.0,
-        params={"upright_threshold": 0.85},
-    )
+    # ── Supporting rewards ────────────────────────────────────────────────────
+    alive = RewTerm(func=mdp.is_alive, weight=0.5)
+
+    # weight=8.0 — forces actual jump takeoff
     jump_height = RewTerm(
-        func=base_height_reward, weight=3.0,
-        params={"target_height": 1.3, "asset_cfg": SceneEntityCfg("robot")},
+        func=base_height_reward, weight=8.0,
+        params={"target_height": 1.5, "asset_cfg": SceneEntityCfg("robot")},
     )
-    landing_smoothness = RewTerm(func=mdp.lin_vel_z_l2, weight=-0.001)
+
+    # weight=10.0 — forces clean upright landing
+    upright_after_land = RewTerm(
+        func=upright_posture_reward, weight=10.0,
+        params={"upright_threshold": 0.7},
+    )
+
+    # ── Regularisation ────────────────────────────────────────────────────────
+    # weight=-0.0001 (reduced from -0.001)
+    # lin_vel_z_l2 squares vertical velocity — during backflip this gets very
+    # large (robot moving fast vertically) causing value function explosion
+    # 10x reduction prevents the 28M loss seen at iter 259
+    landing_smoothness = RewTerm(func=mdp.lin_vel_z_l2,     weight=-0.0001)
     dof_torques_l2     = RewTerm(func=mdp.joint_torques_l2, weight=-1e-6)
     action_rate_l2     = RewTerm(func=mdp.action_rate_l2,   weight=-0.01)
-    knee_deviation = RewTerm(
+    knee_deviation     = RewTerm(
         func=mdp.joint_deviation_l1, weight=-0.1,
         params={"asset_cfg": SceneEntityCfg("robot",
             joint_names=["left_knee_joint", "right_knee_joint"])},
     )
-    waist_deviation = RewTerm(
+    waist_deviation    = RewTerm(
         func=mdp.joint_deviation_l1, weight=-0.05,
         params={"asset_cfg": SceneEntityCfg("robot",
             joint_names=["waist_roll_joint", "waist_pitch_joint"])},
@@ -279,24 +304,48 @@ class TerminationsCfg:
 
 @configclass
 class EventCfg:
+    # ── Friction randomization ────────────────────────────────────────────────
     physics_material = EventTerm(
         func=mdp.randomize_rigid_body_material, mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (0.7, 1.3),
-            "dynamic_friction_range": (0.6, 1.2),
-            "restitution_range": (0.0, 0.1),
+            "static_friction_range":  (0.4, 1.6),
+            "dynamic_friction_range": (0.4, 1.4),
+            "restitution_range":      (0.0, 0.2),
             "num_buckets": 64,
         },
     )
+
+    # ── Mass randomization ────────────────────────────────────────────────────
     add_base_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass, mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="pelvis"),
-            "mass_distribution_params": (-1.5, 1.5),
+            "mass_distribution_params": (-2.0, 2.0),
             "operation": "add",
         },
     )
+    randomize_link_mass = EventTerm(
+        func=mdp.randomize_rigid_body_mass, mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+            "mass_distribution_params": (0.8, 1.2),
+            "operation": "scale",
+        },
+    )
+
+    # ── Actuator gain randomization ───────────────────────────────────────────
+    randomize_actuator_gains = EventTerm(
+        func=mdp.randomize_actuator_gains, mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "stiffness_distribution_params": (0.75, 1.25),
+            "damping_distribution_params":   (0.75, 1.25),
+            "operation": "scale",
+        },
+    )
+
+    # ── Pushes and resets ─────────────────────────────────────────────────────
     push_robot = EventTerm(
         func=mdp.push_by_setting_velocity, mode="interval",
         interval_range_s=(8.0, 10.0),
@@ -342,11 +391,13 @@ class HumanoidBackflipEnvCfg(ManagerBasedRLEnvCfg):
 class HumanoidBackflipEnvCfg_PLAY(HumanoidBackflipEnvCfg):
     def __post_init__(self):
         super().__post_init__()
-        self.scene.num_envs    = 16
+        self.scene.num_envs    = 1
         self.scene.env_spacing = 3.0
         self.observations.policy.enable_corruption = False
         if hasattr(self.events, "push_robot"):
             self.events.push_robot = None
+        self.viewer.eye    = (3.0, 3.0, 2.0)
+        self.viewer.lookat = (0.0, 0.0, 1.0)
 
 
 ##############################################################################
