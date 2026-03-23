@@ -33,7 +33,7 @@ def humanoid_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             max_grad_norm=1.0,
         ),
         experiment_name="humanoid_velocity",
-        save_interval=50,
+        save_interval=5000,
         num_steps_per_env=24,
         max_iterations=30_000,
     )

@@ -1,4 +1,4 @@
-"""Keyboard controlled velocity policy — rough terrain."""
+"""Keyboard controlled velocity policy — random grid terrain — native viewer."""
 from dataclasses import asdict
 from rsl_rl.runners import OnPolicyRunner
 from mjlab.envs import ManagerBasedRlEnv
@@ -8,8 +8,7 @@ from mjlab.viewer import NativeMujocoViewer
 from mjlab.viewer.native.keys import KEY_W, KEY_A, KEY_S, KEY_D, KEY_SPACE
 import mjlab.tasks
 
-TASK_ID = "Mjlab-Velocity-Rough-Humanoid"
-CKPT    = "logs/rsl_rl/humanoid_velocity/2026-03-21_10-52-56/model_16849.pt"
+TASK_ID = "Mjlab-Velocity-RandomGrid-Humanoid"
 DEVICE  = "cuda:0"
 SPEED   = 1.0
 TURN    = 0.6
@@ -34,16 +33,26 @@ def key_callback(key):
         vx, vy, wz = 0.0, 0.0, 0.0
         print(f"\r⬛ STOP                   ", end='', flush=True)
 
+print("Loading environment...")
 env_cfg = load_env_cfg(TASK_ID, play=True)
 env_cfg.scene.num_envs = 1
 env = ManagerBasedRlEnv(cfg=env_cfg, device=DEVICE)
 env = RslRlVecEnvWrapper(env)
+print("✅ Environment loaded")
 
+print("Loading policy...")
 agent_cfg = load_rl_cfg(TASK_ID)
 runner_cls = load_runner_cls(TASK_ID) or OnPolicyRunner
+
+import os
+CKPT = sorted([f for f in os.listdir("logs/rsl_rl/humanoid_velocity/2026-03-21_18-37-49/") if f.endswith(".pt")])[-1]
+CKPT = f"logs/rsl_rl/humanoid_velocity/2026-03-21_18-37-49/{CKPT}"
+print(f"Using: {CKPT}")
+
 runner = runner_cls(env, asdict(agent_cfg), device=DEVICE)
 runner.load(CKPT, map_location=DEVICE)
 base_policy = runner.get_inference_policy(device=DEVICE)
+print("✅ Policy loaded")
 
 class KeyboardPolicy:
     def __call__(self, obs):
@@ -52,12 +61,12 @@ class KeyboardPolicy:
             twist.command[:, 0] = vx
             twist.command[:, 1] = vy
             twist.command[:, 2] = wz
-        except Exception as e:
+        except Exception:
             pass
         return base_policy(obs)
 
 print("\n========================================")
-print("🎮 KEYBOARD CONTROL — ROUGH TERRAIN")
+print("🎮 KEYBOARD CONTROL — RANDOM GRID")
 print("  W = Forward    S = Backward")
 print("  A = Turn Left  D = Turn Right")
 print("  SPACE = Stop   ESC = Quit")

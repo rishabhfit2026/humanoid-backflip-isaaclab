@@ -66,3 +66,34 @@ if __name__ == "__main__":
   )
   terrain = TerrainImporter(terrain_cfg, device="cuda:0")
   mujoco.viewer.launch(terrain.spec.compile())
+
+
+RANDOM_GRID_TERRAINS_CFG = TerrainGeneratorCfg(
+  size=(8.0, 8.0),
+  border_width=20.0,
+  num_rows=10,
+  num_cols=20,
+  sub_terrains={
+    'flat': terrain_gen.BoxFlatTerrainCfg(proportion=0.2),
+    'random_grid_easy': terrain_gen.BoxRandomGridTerrainCfg(
+      proportion=0.3,
+      grid_width=0.9,
+      grid_height_range=(0.05, 0.2),
+      platform_width=1.5,
+    ),
+    'random_grid_hard': terrain_gen.BoxRandomGridTerrainCfg(
+      proportion=0.3,
+      grid_width=0.9,
+      grid_height_range=(0.1, 0.3),
+      platform_width=1.5,
+    ),
+    'pyramid_stairs': terrain_gen.BoxPyramidStairsTerrainCfg(
+      proportion=0.2,
+      step_height_range=(0.0, 0.1),
+      step_width=0.3,
+      platform_width=3.0,
+      border_width=1.0,
+    ),
+  },
+  add_lights=False,
+)
